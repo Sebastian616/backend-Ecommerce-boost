@@ -1,0 +1,276 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Rol {
+  CLIENTE
+  ADMIN
+}
+
+enum EstadoOrden {
+  PENDIENTE
+  PAGADA
+  ENVIADA
+  ENTREGADA
+  CANCELADA
+}
+
+enum EstadoPago {
+  PENDIENTE
+  APROBADO
+  RECHAZADO
+  REEMBOLSADO
+}
+
+enum TipoCupon {
+  PORCENTAJE
+  MONTO_FIJO
+}
+
+enum TipoMovimiento {
+  ENTRADA
+  SALIDA_VENTA
+  DEVOLUCION
+  AJUSTE
+}
+
+model Usuario {
+  id          Int         @id @default(autoincrement())
+  nombre      String
+  email       String      @unique
+  password    String
+  rol         Rol         @default(CLIENTE)
+  activo      Boolean     @default(true)
+  creadoEn    DateTime    @default(now())
+  direcciones Direccion[]
+  carrito     Carrito?
+  ordenes     Orden[]
+  cuponUsos   CuponUso[]
+
+  @@map("usuarios")
+}
+
+model Direccion {
+  id           Int     @id @default(autoincrement())
+  usuarioId    Int
+  usuario      Usuario @relation(fields: [usuarioId], references: [id], onDelete: Cascade)
+  nombre       String
+  telefono     String
+  linea1       String
+  linea2       String?
+  ciudad       String
+  departamento String
+  pais         String  @default("CO")
+  codigoPostal String?
+  principal    Boolean @default(false)
+  ordenes      Orden[]
+
+  @@index([usuarioId])
+  @@map("direcciones")
+}
+
+model Categoria {
+  id        Int         @id @default(autoincrement())
+  nombre    String
+  slug      String      @unique
+  padreId   Int?
+  padre     Categoria?  @relation("Jerarquia", fields: [padreId], references: [id])
+  hijas     Categoria[] @relation("Jerarquia")
+  productos Producto[]
+
+  @@map("categorias")
+}
+
+model Producto {
+  id          Int                @id @default(autoincrement())
+  categoriaId Int
+  categoria   Categoria          @relation(fields: [categoriaId], references: [id])
+  nombre      String
+  slug        String             @unique
+  descripcion String?
+  precioBase  Decimal            @db.Decimal(12, 2)
+  imagenes    String[]
+  activo      Boolean            @default(true)
+  creadoEn    DateTime           @default(now())
+  variantes   ProductoVariante[]
+
+  @@index([categoriaId])
+  @@map("productos")
+}
+
+model Color {
+  id        Int                @id @default(autoincrement())
+  nombre    String             @unique
+  hex       String
+  variantes ProductoVariante[]
+
+  @@map("colores")
+}
+
+model Talla {
+  id        Int                @id @default(autoincrement())
+  nombre    String             @unique
+  orden     Int                @default(0)
+  variantes ProductoVariante[]
+
+  @@map("tallas")
+}
+
+model ProductoVariante {
+  id            Int                    @id @default(autoincrement())
+  productoId    Int
+  producto      Producto               @relation(fields: [productoId], references: [id], onDelete: Cascade)
+  colorId       Int
+  color         Color                  @relation(fields: [colorId], references: [id])
+  tallaId       Int
+  talla         Talla                  @relation(fields: [tallaId], references: [id])
+  sku           String                 @unique
+  precio        Decimal?               @db.Decimal(12, 2)
+  stock         Int                    @default(0)
+  activo        Boolean                @default(true)
+  movimientos   InventarioMovimiento[]
+  ordenDetalles OrdenDetalle[]
+  carritoItems  CarritoItem[]
+
+  @@unique([productoId, colorId, tallaId])
+  @@map("producto_variantes")
+}
+
+model InventarioMovimiento {
+  id              Int              @id @default(autoincrement())
+  varianteId      Int
+  variante        ProductoVariante @relation(fields: [varianteId], references: [id])
+  ordenId         Int?
+  orden           Orden?           @relation(fields: [ordenId], references: [id])
+  tipo            TipoMovimiento
+  cantidad        Int
+  stockResultante Int
+  nota            String?
+  creadoEn        DateTime         @default(now())
+
+  @@index([varianteId])
+  @@map("inventario_movimientos")
+}
+
+model Carrito {
+  id            Int           @id @default(autoincrement())
+  usuarioId     Int           @unique
+  usuario       Usuario       @relation(fields: [usuarioId], references: [id], onDelete: Cascade)
+  items         CarritoItem[]
+  actualizadoEn DateTime      @updatedAt
+
+  @@map("carritos")
+}
+
+model CarritoItem {
+  id         Int              @id @default(autoincrement())
+  carritoId  Int
+  carrito    Carrito          @relation(fields: [carritoId], references: [id], onDelete: Cascade)
+  varianteId Int
+  variante   ProductoVariante @relation(fields: [varianteId], references: [id])
+  cantidad   Int
+
+  @@unique([carritoId, varianteId])
+  @@map("carrito_items")
+}
+
+model Orden {
+  id          Int                    @id @default(autoincrement())
+  numero      String                 @unique
+  usuarioId   Int
+  usuario     Usuario                @relation(fields: [usuarioId], references: [id])
+  direccionId Int
+  direccion   Direccion              @relation(fields: [direccionId], references: [id])
+  estado      EstadoOrden            @default(PENDIENTE)
+  subtotal    Decimal                @db.Decimal(12, 2)
+  descuento   Decimal                @default(0) @db.Decimal(12, 2)
+  envio       Decimal                @default(0) @db.Decimal(12, 2)
+  total       Decimal                @db.Decimal(12, 2)
+  creadoEn    DateTime               @default(now())
+  detalles    OrdenDetalle[]
+  pagos       Pago[]
+  cupones     OrdenCupon[]
+  movimientos InventarioMovimiento[]
+  cuponUsos   CuponUso[]
+
+  @@index([usuarioId])
+  @@index([estado, creadoEn])
+  @@map("ordenes")
+}
+
+model OrdenDetalle {
+  id             Int              @id @default(autoincrement())
+  ordenId        Int
+  orden          Orden            @relation(fields: [ordenId], references: [id], onDelete: Cascade)
+  varianteId     Int
+  variante       ProductoVariante @relation(fields: [varianteId], references: [id])
+  nombreProducto String
+  precioUnitario Decimal          @db.Decimal(12, 2)
+  cantidad       Int
+  subtotal       Decimal          @db.Decimal(12, 2)
+
+  @@map("orden_detalle")
+}
+
+model Pago {
+  id         Int        @id @default(autoincrement())
+  ordenId    Int
+  orden      Orden      @relation(fields: [ordenId], references: [id])
+  metodo     String     @default("TARJETA")
+  proveedor  String?
+  referencia String?    @unique
+  monto      Decimal    @db.Decimal(12, 2)
+  estado     EstadoPago @default(PENDIENTE)
+  creadoEn   DateTime   @default(now())
+
+  @@map("pagos")
+}
+
+model Cupon {
+  id                Int          @id @default(autoincrement())
+  codigo            String       @unique
+  tipo              TipoCupon
+  valor             Decimal      @db.Decimal(12, 2)
+  compraMinima      Decimal?     @db.Decimal(12, 2)
+  maxUsos           Int?
+  usosActuales      Int          @default(0)
+  maxUsosPorUsuario Int          @default(1)
+  inicia            DateTime?
+  expira            DateTime?
+  activo            Boolean      @default(true)
+  ordenes           OrdenCupon[]
+  usos              CuponUso[]
+
+  @@map("cupones")
+}
+
+model OrdenCupon {
+  id        Int     @id @default(autoincrement())
+  ordenId   Int
+  orden     Orden   @relation(fields: [ordenId], references: [id], onDelete: Cascade)
+  cuponId   Int
+  cupon     Cupon   @relation(fields: [cuponId], references: [id])
+  descuento Decimal @db.Decimal(12, 2)
+
+  @@unique([ordenId, cuponId])
+  @@map("orden_cupones")
+}
+
+model CuponUso {
+  id        Int      @id @default(autoincrement())
+  cuponId   Int
+  cupon     Cupon    @relation(fields: [cuponId], references: [id])
+  usuarioId Int
+  usuario   Usuario  @relation(fields: [usuarioId], references: [id])
+  ordenId   Int
+  orden     Orden    @relation(fields: [ordenId], references: [id], onDelete: Cascade)
+  usadoEn   DateTime @default(now())
+
+  @@index([cuponId, usuarioId])
+  @@map("cupon_usos")
+}
