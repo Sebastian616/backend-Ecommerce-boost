@@ -11,7 +11,11 @@ const incluir = { detalles: true, pagos: true, cupones: { include: { cupon: true
 
 // Checkout: crea la orden y descuenta el stock automáticamente
 r.post('/', async (req, res) => {
-  const d = z.object({ direccionId: z.number().int(), cuponCodigo: z.string().optional() }).parse(req.body);
+  const d = z.object({
+    direccionId: z.number().int(),
+    cuponCodigo: z.string().optional(),
+    metodo: z.enum(['EFECTIVO', 'TRANSFERENCIA', 'TARJETA']).default('EFECTIVO'),
+  }).parse(req.body);
   res.status(201).json(await crearOrden(req.user.id, d));
 });
 
@@ -35,6 +39,17 @@ r.post('/:id/cancelar', async (req, res) =>
     usuarioId: req.user.id,
     esAdmin: req.user.rol === 'ADMIN',
   })));
+
+// Admin: confirma un pago manual (transferencia o efectivo)
+r.patch('/:id/confirmar-pago', soloAdmin, async (req, res) => {
+  const id = Number(req.params.id);
+  await prisma.$transaction(async (tx) => {
+    const n = await tx.orden.updateMany({ where: { id, estado: 'PENDIENTE' }, data: { estado: 'PAGADA' } });
+    if (!n.count) throw new HttpError(409, 'La orden no está pendiente de pago');
+    await tx.pago.updateMany({ where: { ordenId: id, estado: 'PENDIENTE' }, data: { estado: 'APROBADO' } });
+  });
+  res.json(await prisma.orden.findUnique({ where: { id } }));
+});
 
 // Admin: PAGADA -> ENVIADA -> ENTREGADA
 r.patch('/:id/estado', soloAdmin, async (req, res) => {

@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
+import { Prisma } from '@prisma/client';
 import { prisma } from '../lib/prisma.js';
 import { HttpError } from '../lib/errors.js';
 import { auth } from '../middleware/auth.js';
@@ -37,53 +38,102 @@ r.delete('/direcciones/:id', async (req, res) => {
 });
 
 // ---- Carrito
-const getCarrito = (usuarioId) =>
-  prisma.carrito.upsert({
-    where: { usuarioId },
-    update: {},
-    create: { usuarioId },
-    include: { items: { include: { variante: { include: { producto: true, color: true, talla: true } } } } },
-  });
+// Una sola consulta liviana (solo los campos necesarios). El servidor calcula
+// precioUnitario, subtotal y total: el frontend no tiene que adivinar precios.
+const itemSelect = {
+  varianteId: true,
+  cantidad: true,
+  variante: {
+    select: {
+      id: true, sku: true, stock: true, precio: true,
+      color: { select: { nombre: true } },
+      talla: { select: { nombre: true } },
+      producto: { select: { id: true, nombre: true, precioBase: true, imagenes: true } },
+    },
+  },
+};
 
-r.get('/carrito', async (req, res) => {
-  const c = await getCarrito(req.user.id);
-  const total = c.items.reduce(
-    (s, i) => s + Number(i.variante.precio ?? i.variante.producto.precioBase) * i.cantidad, 0);
-  res.json({ ...c, total });
-});
+function formatCarrito(c) {
+  const items = (c?.items ?? []).map((i) => {
+    const precio = new Prisma.Decimal(i.variante.precio ?? i.variante.producto.precioBase);
+    return {
+      varianteId: i.varianteId,
+      cantidad: i.cantidad,
+      precioUnitario: precio.toNumber(),
+      subtotal: precio.mul(i.cantidad).toNumber(),
+      variante: i.variante,
+    };
+  });
+  const subtotal = items.reduce((s, i) => s + i.subtotal, 0);
+  return {
+    id: c?.id ?? null,
+    items,
+    cantidadTotal: items.reduce((s, i) => s + i.cantidad, 0),
+    subtotal,
+    total: subtotal, // el envío se calcula al crear la orden
+  };
+}
+
+async function carritoDe(usuarioId) {
+  const c = await prisma.carrito.findUnique({
+    where: { usuarioId },
+    select: { id: true, items: { select: itemSelect, orderBy: { id: 'asc' } } },
+  });
+  return formatCarrito(c);
+}
+
+async function carritoId(usuarioId) {
+  const c = await prisma.carrito.findUnique({ where: { usuarioId }, select: { id: true } });
+  return c ? c.id : (await prisma.carrito.create({ data: { usuarioId }, select: { id: true } })).id;
+}
+
+r.get('/carrito', async (req, res) => res.json(await carritoDe(req.user.id)));
 
 r.post('/carrito/items', async (req, res) => {
   const d = z.object({ varianteId: z.number().int(), cantidad: z.number().int().min(1) }).parse(req.body);
-  const v = await prisma.productoVariante.findFirst({ where: { id: d.varianteId, activo: true } });
+  const [v, cid] = await Promise.all([
+    prisma.productoVariante.findFirst({
+      where: { id: d.varianteId, activo: true, producto: { activo: true } },
+      select: { id: true, stock: true },
+    }),
+    carritoId(req.user.id),
+  ]);
   if (!v) throw new HttpError(404, 'Variante no encontrada');
-  const c = await getCarrito(req.user.id);
-  const actual = c.items.find((i) => i.varianteId === d.varianteId)?.cantidad ?? 0;
-  if (actual + d.cantidad > v.stock) throw new HttpError(409, `Solo hay ${v.stock} unidades disponibles`);
-  await prisma.carritoItem.upsert({
-    where: { carritoId_varianteId: { carritoId: c.id, varianteId: d.varianteId } },
-    update: { cantidad: { increment: d.cantidad } },
-    create: { carritoId: c.id, varianteId: d.varianteId, cantidad: d.cantidad },
+
+  const existente = await prisma.carritoItem.findUnique({
+    where: { carritoId_varianteId: { carritoId: cid, varianteId: d.varianteId } },
+    select: { cantidad: true },
   });
-  res.status(201).json(await getCarrito(req.user.id));
+  const nueva = (existente?.cantidad ?? 0) + d.cantidad;
+  if (nueva > v.stock) throw new HttpError(409, `Solo hay ${v.stock} unidades disponibles`);
+
+  await prisma.carritoItem.upsert({
+    where: { carritoId_varianteId: { carritoId: cid, varianteId: d.varianteId } },
+    update: { cantidad: nueva },
+    create: { carritoId: cid, varianteId: d.varianteId, cantidad: d.cantidad },
+  });
+  res.status(201).json(await carritoDe(req.user.id));
 });
 
 r.patch('/carrito/items/:varianteId', async (req, res) => {
   const { cantidad } = z.object({ cantidad: z.number().int().min(1) }).parse(req.body);
   const varianteId = Number(req.params.varianteId);
-  const v = await prisma.productoVariante.findUniqueOrThrow({ where: { id: varianteId } });
+  const [v, cid] = await Promise.all([
+    prisma.productoVariante.findUnique({ where: { id: varianteId }, select: { stock: true } }),
+    carritoId(req.user.id),
+  ]);
+  if (!v) throw new HttpError(404, 'Variante no encontrada');
   if (cantidad > v.stock) throw new HttpError(409, `Solo hay ${v.stock} unidades disponibles`);
-  const c = await getCarrito(req.user.id);
-  await prisma.carritoItem.update({
-    where: { carritoId_varianteId: { carritoId: c.id, varianteId } },
-    data: { cantidad },
-  });
-  res.json(await getCarrito(req.user.id));
+
+  const n = await prisma.carritoItem.updateMany({ where: { carritoId: cid, varianteId }, data: { cantidad } });
+  if (!n.count) throw new HttpError(404, 'El producto no está en tu carrito');
+  res.json(await carritoDe(req.user.id));
 });
 
 r.delete('/carrito/items/:varianteId', async (req, res) => {
-  const c = await getCarrito(req.user.id);
-  await prisma.carritoItem.deleteMany({ where: { carritoId: c.id, varianteId: Number(req.params.varianteId) } });
-  res.status(204).end();
+  const cid = await carritoId(req.user.id);
+  await prisma.carritoItem.deleteMany({ where: { carritoId: cid, varianteId: Number(req.params.varianteId) } });
+  res.json(await carritoDe(req.user.id));
 });
 
 export default r;

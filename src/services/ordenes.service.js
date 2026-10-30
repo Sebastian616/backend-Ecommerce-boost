@@ -30,7 +30,7 @@ export async function validarCupon(tx, codigo, usuarioId, subtotal) {
  * El descuento es atómico (UPDATE ... WHERE stock >= cantidad): dos compras
  * simultáneas nunca pueden dejar el stock en negativo (sin overselling).
  */
-export async function crearOrden(usuarioId, { direccionId, cuponCodigo }) {
+export async function crearOrden(usuarioId, { direccionId, cuponCodigo, metodo = 'EFECTIVO' }) {
   return prisma.$transaction(async (tx) => {
     const direccion = await tx.direccion.findFirst({ where: { id: direccionId, usuarioId } });
     if (!direccion) throw new HttpError(404, 'Dirección no encontrada');
@@ -64,7 +64,9 @@ export async function crearOrden(usuarioId, { direccionId, cuponCodigo }) {
       cupon = await validarCupon(tx, cuponCodigo, usuarioId, subtotal);
       descuento = calcularDescuento(cupon, subtotal);
     }
-    const envio = D(process.env.COSTO_ENVIO ?? 0);
+    // Envío gratis desde ENVIO_GRATIS_DESDE (sobre el subtotal, igual que el aviso del carrito)
+    const gratisDesde = Number(process.env.ENVIO_GRATIS_DESDE ?? 0);
+    const envio = gratisDesde > 0 && subtotal.gte(gratisDesde) ? D(0) : D(process.env.COSTO_ENVIO ?? 0);
     const total = subtotal.sub(descuento).add(envio);
 
     const orden = await tx.orden.create({
@@ -77,7 +79,7 @@ export async function crearOrden(usuarioId, { direccionId, cuponCodigo }) {
         envio,
         total,
         detalles: { create: detalles },
-        pagos: { create: { monto: total } },
+        pagos: { create: { monto: total, metodo } },
       },
     });
 
@@ -165,11 +167,24 @@ export async function cancelarOrden(ordenId, { usuarioId = null, esAdmin = false
   });
 }
 
-/** Cancela órdenes PENDIENTES sin pago pasado el límite (libera el stock reservado). */
+/**
+ * Libera el stock de órdenes que nunca se pagaron:
+ *  - TARJETA: tras MINUTOS_EXPIRACION_ORDEN (30 por defecto)
+ *  - TRANSFERENCIA: tras HORAS_EXPIRACION_TRANSFERENCIA (24 por defecto)
+ *  - EFECTIVO: nunca expira (se paga al recibir)
+ */
 export async function expirarOrdenesPendientes() {
-  const limite = new Date(Date.now() - Number(process.env.MINUTOS_EXPIRACION_ORDEN ?? 30) * 60000);
+  const ahora = Date.now();
+  const limiteTarjeta = new Date(ahora - Number(process.env.MINUTOS_EXPIRACION_ORDEN ?? 30) * 60000);
+  const limiteTransf = new Date(ahora - Number(process.env.HORAS_EXPIRACION_TRANSFERENCIA ?? 24) * 3600000);
   const vencidas = await prisma.orden.findMany({
-    where: { estado: 'PENDIENTE', creadoEn: { lt: limite } },
+    where: {
+      estado: 'PENDIENTE',
+      OR: [
+        { creadoEn: { lt: limiteTarjeta }, pagos: { some: { metodo: 'TARJETA' } } },
+        { creadoEn: { lt: limiteTransf }, pagos: { some: { metodo: 'TRANSFERENCIA' } } },
+      ],
+    },
     select: { id: true },
   });
   for (const o of vencidas) {
