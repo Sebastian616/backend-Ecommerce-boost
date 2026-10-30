@@ -7,7 +7,23 @@ import { crearOrden, cancelarOrden } from '../services/ordenes.service.js';
 
 const r = Router();
 r.use(auth);
-const incluir = { detalles: true, pagos: true, cupones: { include: { cupon: true } }, direccion: true };
+const incluir = {
+  detalles: {
+    include: {
+      variante: {
+        select: {
+          sku: true,
+          color: { select: { nombre: true } },
+          talla: { select: { nombre: true } },
+          producto: { select: { id: true, imagenes: true } },
+        },
+      },
+    },
+  },
+  pagos: true,
+  cupones: { include: { cupon: { select: { codigo: true } } } },
+  direccion: true,
+};
 
 // Checkout: crea la orden y descuenta el stock automáticamente
 r.post('/', async (req, res) => {
